@@ -1,6 +1,7 @@
-
 from datetime import datetime, timedelta, timezone
 import sys
+import time
+from threading import Lock
 
 import numpy as np
 import requests
@@ -8,16 +9,46 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from skyfield.api import EarthSatellite, load
 
+
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 FINE_STEP_SECONDS = 5
 COARSE_STEP_SECONDS = 60
 DEFAULT_HOURS = 24
 SCREENING_THRESHOLD_KM = 5.0
 TLE_STALE_DAYS = 7
 
+# Cache successfully downloaded TLEs for two hours.
+TLE_CACHE_SECONDS = 2 * 60 * 60
+
+_tle_cache = {}
+_tle_cache_lock = Lock()
+
+
+# --------------------------------------------------
+# TLE DOWNLOAD AND CACHE
+# --------------------------------------------------
 
 def get_satellite_tle(norad_id):
-    """Download and validate public TLE data for one satellite."""
+    """Download, validate, and temporarily cache public TLE data."""
     norad_id = int(norad_id)
+
+    if norad_id <= 0:
+        raise ValueError("NORAD ID must be a positive integer")
+
+    now = time.time()
+
+    # Return recently fetched data without contacting CelesTrak.
+    with _tle_cache_lock:
+        cached = _tle_cache.get(norad_id)
+
+        if (
+            cached is not None
+            and now - cached["fetched_at"] < TLE_CACHE_SECONDS
+        ):
+            return cached["tle"]
 
     url = (
         "https://celestrak.org/NORAD/elements/gp.php"
@@ -34,7 +65,11 @@ def get_satellite_tle(norad_id):
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
     )
-    session.mount("https://", HTTPAdapter(max_retries=retry))
+
+    session.mount(
+        "https://",
+        HTTPAdapter(max_retries=retry),
+    )
 
     try:
         response = session.get(
@@ -43,12 +78,13 @@ def get_satellite_tle(norad_id):
             headers={"User-Agent": "OrbitShieldAI/1.0"},
         )
         response.raise_for_status()
+        response_text = response.text
     finally:
         session.close()
 
     lines = [
         line.strip()
-        for line in response.text.splitlines()
+        for line in response_text.splitlines()
         if line.strip()
     ]
 
@@ -64,13 +100,30 @@ def get_satellite_tle(norad_id):
     expected_id = str(norad_id)
 
     if lines[1][2:7].strip() != expected_id:
-        raise ValueError(f"TLE NORAD ID mismatch for {norad_id}")
+        raise ValueError(
+            f"TLE NORAD ID mismatch for {norad_id}"
+        )
 
     if lines[2][2:7].strip() != expected_id:
-        raise ValueError(f"TLE NORAD ID mismatch for {norad_id}")
+        raise ValueError(
+            f"TLE NORAD ID mismatch for {norad_id}"
+        )
 
-    return lines[0], lines[1], lines[2]
+    tle = (lines[0], lines[1], lines[2])
 
+    # Cache only after a successful response and validation.
+    with _tle_cache_lock:
+        _tle_cache[norad_id] = {
+            "tle": tle,
+            "fetched_at": time.time(),
+        }
+
+    return tle
+
+
+# --------------------------------------------------
+# TLE TIME AND ORBITAL CALCULATIONS
+# --------------------------------------------------
 
 def tle_epoch_utc(line1):
     """Parse the epoch from a standard two-line element set."""
@@ -89,15 +142,16 @@ def tle_epoch_utc(line1):
 
 def separation_km(satellite_a, satellite_b, ts, moment):
     """Calculate satellite separation at a given UTC time."""
-    time = ts.from_datetime(moment)
-    pos_a = satellite_a.at(time).position.km
-    pos_b = satellite_b.at(time).position.km
+    skyfield_time = ts.from_datetime(moment)
+
+    pos_a = satellite_a.at(skyfield_time).position.km
+    pos_b = satellite_b.at(skyfield_time).position.km
 
     return float(np.linalg.norm(pos_a - pos_b))
 
 
 def _refine_candidate(sat_a, sat_b, ts, start, end):
-    """Refine a candidate minimum with a 5-second grid."""
+    """Refine a candidate minimum using a five-second grid."""
     count = int(
         (end - start).total_seconds() / FINE_STEP_SECONDS
     ) + 1
@@ -111,6 +165,7 @@ def _refine_candidate(sat_a, sat_b, ts, start, end):
         dates.append(end)
 
     times = ts.from_datetimes(dates)
+
     pos_a = sat_a.at(times).position.km
     pos_b = sat_b.at(times).position.km
 
@@ -120,14 +175,21 @@ def _refine_candidate(sat_a, sat_b, ts, start, end):
     return dates[index], float(distances[index])
 
 
+# --------------------------------------------------
+# CLOSE APPROACH SCREENING
+# --------------------------------------------------
+
 def find_closest_approach(
     satellite_a_id,
     satellite_b_id,
     hours=DEFAULT_HOURS,
 ):
-    """Screen a time window and refine sampled local minima."""
+    """Estimate closest sampled separation using public TLE data."""
     satellite_a_id = int(satellite_a_id)
     satellite_b_id = int(satellite_b_id)
+
+    if satellite_a_id <= 0 or satellite_b_id <= 0:
+        raise ValueError("Both NORAD IDs must be positive integers")
 
     if satellite_a_id == satellite_b_id:
         raise ValueError(
@@ -139,6 +201,7 @@ def find_closest_approach(
 
     ts = load.timescale()
 
+    # Fetch both TLEs. Successful downloads are cached for two hours.
     name_a, line1_a, line2_a = get_satellite_tle(
         satellite_a_id
     )
@@ -165,9 +228,7 @@ def find_closest_approach(
     start = now
     end = start + timedelta(hours=hours)
 
-    count = int(
-        hours * 3600 / COARSE_STEP_SECONDS
-    )
+    count = int(hours * 3600 / COARSE_STEP_SECONDS)
 
     coarse_dates = [
         start + timedelta(seconds=i * COARSE_STEP_SECONDS)
@@ -248,6 +309,10 @@ def find_closest_approach(
     }
 
 
+# --------------------------------------------------
+# ILLUSTRATIVE THRESHOLD FLAG
+# --------------------------------------------------
+
 def recommend_simulated_maneuver(
     separation_km,
     threshold_km=SCREENING_THRESHOLD_KM,
@@ -291,6 +356,10 @@ def recommend_simulated_maneuver(
         ),
     }
 
+
+# --------------------------------------------------
+# COMMAND-LINE ENTRY POINT
+# --------------------------------------------------
 
 def main():
     try:
