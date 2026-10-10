@@ -31,6 +31,7 @@ _tle_cache_lock = Lock()
 # TLE DOWNLOAD AND CACHE
 # --------------------------------------------------
 
+
 def get_satellite_tle(norad_id):
     """Download, validate, and temporarily cache public TLE data."""
     norad_id = int(norad_id)
@@ -119,6 +120,61 @@ def get_satellite_tle(norad_id):
         }
 
     return tle
+
+
+# --------------------------------------------------
+# TLE TIME AND ORBITAL CALCULATIONS
+# --------------------------------------------------
+
+def tle_epoch_utc(line1):
+    """Parse the epoch from a standard two-line element set."""
+    try:
+        year = int(line1[18:20])
+        year += 2000 if year < 57 else 1900
+        day_of_year = float(line1[20:32])
+
+        return datetime(
+            year, 1, 1, tzinfo=timezone.utc
+        ) + timedelta(days=day_of_year - 1)
+
+    except (ValueError, IndexError) as exc:
+        raise ValueError("Unable to parse TLE epoch") from exc
+
+
+def separation_km(satellite_a, satellite_b, ts, moment):
+    """Calculate satellite separation at a given UTC time."""
+    skyfield_time = ts.from_datetime(moment)
+
+    pos_a = satellite_a.at(skyfield_time).position.km
+    pos_b = satellite_b.at(skyfield_time).position.km
+
+    return float(np.linalg.norm(pos_a - pos_b))
+
+
+def _refine_candidate(sat_a, sat_b, ts, start, end):
+    """Refine a candidate minimum using a five-second grid."""
+    count = int(
+        (end - start).total_seconds() / FINE_STEP_SECONDS
+    ) + 1
+
+    dates = [
+        start + timedelta(seconds=i * FINE_STEP_SECONDS)
+        for i in range(count)
+    ]
+
+    if dates[-1] < end:
+        dates.append(end)
+
+    times = ts.from_datetimes(dates)
+
+    pos_a = sat_a.at(times).position.km
+    pos_b = sat_b.at(times).position.km
+
+    distances = np.linalg.norm(pos_a - pos_b, axis=0)
+    index = int(np.argmin(distances))
+
+    return dates[index], float(distances[index])
+
 
 
 # --------------------------------------------------
