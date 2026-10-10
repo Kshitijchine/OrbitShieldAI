@@ -31,7 +31,6 @@ _tle_cache_lock = Lock()
 # TLE DOWNLOAD AND CACHE
 # --------------------------------------------------
 
-
 def get_satellite_tle(norad_id):
     """Download, validate, and temporarily cache public TLE data."""
     norad_id = int(norad_id)
@@ -41,7 +40,6 @@ def get_satellite_tle(norad_id):
 
     now = time.time()
 
-    # Return recently fetched data without contacting CelesTrak.
     with _tle_cache_lock:
         cached = _tle_cache.get(norad_id)
 
@@ -51,75 +49,68 @@ def get_satellite_tle(norad_id):
         ):
             return cached["tle"]
 
-    url = (
-        "https://celestrak.org/NORAD/elements/gp.php"
-        f"?CATNR={norad_id}&FORMAT=TLE"
-    )
-
-    session = requests.Session()
-
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=0,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-
-    session.mount(
-        "https://",
-        HTTPAdapter(max_retries=retry),
-    )
-
-    try:
-        response = session.get(
-            url,
-            timeout=(10, 20),
-            headers={"User-Agent": "OrbitShieldAI/1.0"},
-        )
-        response.raise_for_status()
-        response_text = response.text
-    finally:
-        session.close()
-
-    lines = [
-        line.strip()
-        for line in response_text.splitlines()
-        if line.strip()
+    urls = [
+        (
+            "https://celestrak.org/NORAD/elements/gp.php"
+            f"?CATNR={norad_id}&FORMAT=TLE"
+        ),
+        (
+            "https://celestrak.com/NORAD/elements/gp.php"
+            f"?CATNR={norad_id}&FORMAT=TLE"
+        ),
     ]
 
-    if (
-        len(lines) < 3
-        or not lines[1].startswith("1 ")
-        or not lines[2].startswith("2 ")
-    ):
-        raise ValueError(
-            f"Could not find valid TLE data for NORAD ID {norad_id}"
-        )
+    errors = []
 
-    expected_id = str(norad_id)
+    for url in urls:
+        try:
+            response = requests.get(
+                url,
+                timeout=(5, 10),
+                headers={"User-Agent": "OrbitShieldAI/1.0"},
+            )
+            response.raise_for_status()
 
-    if lines[1][2:7].strip() != expected_id:
-        raise ValueError(
-            f"TLE NORAD ID mismatch for {norad_id}"
-        )
+            lines = [
+                line.strip()
+                for line in response.text.splitlines()
+                if line.strip()
+            ]
 
-    if lines[2][2:7].strip() != expected_id:
-        raise ValueError(
-            f"TLE NORAD ID mismatch for {norad_id}"
-        )
+            if (
+                len(lines) < 3
+                or not lines[1].startswith("1 ")
+                or not lines[2].startswith("2 ")
+            ):
+                raise ValueError("Response does not contain valid TLE lines")
 
-    tle = (lines[0], lines[1], lines[2])
+            expected_id = str(norad_id)
 
-    # Cache only after a successful response and validation.
-    with _tle_cache_lock:
-        _tle_cache[norad_id] = {
-            "tle": tle,
-            "fetched_at": time.time(),
-        }
+            if (
+                lines[1][2:7].strip() != expected_id
+                or lines[2][2:7].strip() != expected_id
+            ):
+                raise ValueError(
+                    f"TLE NORAD ID mismatch for {norad_id}"
+                )
 
-    return tle
+            tle = (lines[0], lines[1], lines[2])
+
+            with _tle_cache_lock:
+                _tle_cache[norad_id] = {
+                    "tle": tle,
+                    "fetched_at": time.time(),
+                }
+
+            return tle
+
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"{url.split('/')[2]}: {exc}")
+
+    raise ConnectionError(
+        f"Unable to download TLE for NORAD ID {norad_id}. "
+        + " | ".join(errors)
+    )
 
 
 # --------------------------------------------------
