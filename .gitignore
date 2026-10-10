@@ -1,0 +1,39 @@
+# Python virtual environments
+.venv/
+.venv313/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local app backups
+app_backup*.py
+
+# Backend backups
+backend/*backup*.py
+
+# Python cache inside backend
+backend/__pycache__/
+
+# Large local datasets
+data/
+
+# Local training output
+training_results.txt
