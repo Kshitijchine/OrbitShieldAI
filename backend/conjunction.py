@@ -30,9 +30,8 @@ _tle_cache_lock = Lock()
 # --------------------------------------------------
 # TLE DOWNLOAD AND CACHE
 # --------------------------------------------------
-
 def get_satellite_tle(norad_id):
-    """Download, validate, and temporarily cache public TLE data."""
+    """Fetch, validate, and cache TLE data from multiple sources."""
     norad_id = int(norad_id)
 
     if norad_id <= 0:
@@ -49,20 +48,30 @@ def get_satellite_tle(norad_id):
         ):
             return cached["tle"]
 
-    urls = [
+    sources = [
         (
+            "CelesTrak",
             "https://celestrak.org/NORAD/elements/gp.php"
-            f"?CATNR={norad_id}&FORMAT=TLE"
+            f"?CATNR={norad_id}&FORMAT=TLE",
+            "tle",
         ),
         (
+            "CelesTrak alternate",
             "https://celestrak.com/NORAD/elements/gp.php"
-            f"?CATNR={norad_id}&FORMAT=TLE"
+            f"?CATNR={norad_id}&FORMAT=TLE",
+            "tle",
+        ),
+        (
+            "TLE API",
+            f"https://tle.ivanstanojevic.me/api/tle/{norad_id}",
+            "json",
         ),
     ]
 
     errors = []
+    expected_id = str(norad_id)
 
-    for url in urls:
+    for source_name, url, response_format in sources:
         try:
             response = requests.get(
                 url,
@@ -71,20 +80,25 @@ def get_satellite_tle(norad_id):
             )
             response.raise_for_status()
 
-            lines = [
-                line.strip()
-                for line in response.text.splitlines()
-                if line.strip()
-            ]
+            if response_format == "json":
+                data = response.json()
+                name = data.get("name", "")
+                line1 = data.get("line1", "")
+                line2 = data.get("line2", "")
+                lines = [name, line1, line2]
+            else:
+                lines = [
+                    line.strip()
+                    for line in response.text.splitlines()
+                    if line.strip()
+                ]
 
             if (
                 len(lines) < 3
                 or not lines[1].startswith("1 ")
                 or not lines[2].startswith("2 ")
             ):
-                raise ValueError("Response does not contain valid TLE lines")
-
-            expected_id = str(norad_id)
+                raise ValueError("Invalid TLE response")
 
             if (
                 lines[1][2:7].strip() != expected_id
@@ -104,15 +118,18 @@ def get_satellite_tle(norad_id):
 
             return tle
 
-        except (requests.RequestException, ValueError) as exc:
-            errors.append(f"{url.split('/')[2]}: {exc}")
+        except (
+            requests.RequestException,
+            ValueError,
+            TypeError,
+            AttributeError,
+        ) as exc:
+            errors.append(f"{source_name}: {exc}")
 
     raise ConnectionError(
         f"Unable to download TLE for NORAD ID {norad_id}. "
         + " | ".join(errors)
     )
-
-
 # --------------------------------------------------
 # TLE TIME AND ORBITAL CALCULATIONS
 # --------------------------------------------------
