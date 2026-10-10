@@ -355,6 +355,7 @@ def display_screening_report(report: str) -> None:
 # --------------------------------------------------
 # ORBITAL SCREENING
 # --------------------------------------------------
+
 def run_orbital_screening(
     satellite_a_id: int,
     satellite_b_id: int,
@@ -392,6 +393,13 @@ def run_orbital_screening(
         st.success("Screening run completed.")
         display_screening_report(report)
 
+    except ConnectionError:
+        st.error(
+            "Orbital screening could not retrieve orbital data for one "
+            "or both satellites. The data provider may be temporarily "
+            "unavailable, or current TLE data may not exist for that "
+            "NORAD ID. Please try again later or use another satellite ID."
+        )
     except Exception as error:
         st.error("Could not run orbital screening.")
         st.code(f"{type(error).__name__}: {error}")
