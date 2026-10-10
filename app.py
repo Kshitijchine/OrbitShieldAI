@@ -207,8 +207,20 @@ else:
             "orbital inputs."
         )
 
+   
+    except ConnectionError as error:
+        st.error(
+            "Orbital screening could not run because TLE data "
+            "is unavailable for one or both satellite IDs."
+        )
+        st.caption(
+            "Check the NORAD IDs or try again later when orbital "
+            "data sources are available."
+        )
+        st.code(str(error))
+
     except Exception as error:
-        st.error("The model could not be loaded.")
+        st.error("Could not run orbital screening.")
         st.code(f"{type(error).__name__}: {error}")
 
 
